@@ -286,9 +286,7 @@ where
 // Private dyn-dispatch wrapper for post-capture `CapturedEffect`. Held inside `Effects.captured`
 // (Vec drops on successful apply). No Vc reads. Mirrors the dynosaur pattern of
 // https://github.com/spastorino/dynosaur.
-pub(crate) trait DynCapturedEffect:
-    TraceRawVcs + NonLocalValue + Send + Sync + 'static
-{
+trait DynCapturedEffect: TraceRawVcs + NonLocalValue + Send + Sync + 'static {
     fn key(&self) -> Box<[u8]>;
     fn value_hash(&self) -> u128;
     fn dyn_apply<'a>(&'a self) -> DynEffectApplyFuture<'a>;
@@ -330,7 +328,7 @@ struct EffectInstance {
 impl EffectInstance {
     fn new(effect: impl Effect) -> Self {
         Self {
-            inner: Box::new(effect) as Box<dyn DynEffect>,
+            inner: Box::new(effect) as _,
         }
     }
 }
@@ -543,8 +541,7 @@ impl PartialEq for Effects {
 impl Eq for Effects {}
 
 impl Effects {
-    /// An `Effects` value with no effects. Used by callers that need a placeholder where no
-    /// side effects were collected.
+    /// A test-only placeholder `Effects` value with no effects (and no producer to invalidate).
     #[cfg(test)]
     fn empty() -> Self {
         Self {

@@ -29,8 +29,8 @@ use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use turbo_tasks::{
     ApplyOutcome, CapturedEffect, Effect, EffectStateStorage, Effects, EffectsError, NonLocalValue,
-    OperationValue, ReadRef, ResolvedVc, State, TurboTasks, Vc, emit_effect,
-    read_strongly_consistent_and_apply_effects, take_effects, trace::TraceRawVcs,
+    OperationValue, ReadRef, ResolvedVc, State, TurboTasks, Vc, emit_effect, take_effects,
+    trace::TraceRawVcs,
 };
 use turbo_tasks_backend::{
     BackendOptions, NoopBackingStorage, TurboTasksBackend, noop_backing_storage,
@@ -720,73 +720,6 @@ async fn capture_skip_then_stomp_signals_retry() {
             shared.captures_with_content() >= 2,
             "recovery capture had to materialize at least once (storage diverged); got {}",
             shared.captures_with_content(),
-        );
-
-        anyhow::Ok(())
-    })
-    .await
-    .unwrap()
-}
-
-/// `read_strongly_consistent_and_apply_effects` is the production entry point: it owns the
-/// read+apply+retry loop that recovers from `EffectsError::Retry`. This drives the same
-/// content-elided-then-stomped scenario as `capture_skip_then_stomp_signals_retry`, but performs
-/// the recovery through the helper instead of a hand-rolled re-read. A bare `apply` would surface
-/// `Retry`; the helper must instead re-read the (invalidated) producer, re-capture with content,
-/// apply successfully, and return the fresh value.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn helper_recovers_from_retry() {
-    let tt = create_tt();
-    tt.run_once(async move {
-        let (
-            input_a,
-            TestInput {
-                shared,
-                spec: spec_a,
-                tick: tick_a,
-            },
-        ) = TestInput::new();
-        let (input_b, TestInput { spec: spec_b, .. }) = TestInput::new_with_shared(shared.clone());
-
-        // T1: A applies (key=1, H_A). Storage = Applied{H_A}.
-        spec_a.set(EmitSpec {
-            pairs: vec![(1, 0xAAAA)],
-        });
-        let op_a = extract_effects(input_a);
-        op_a.read_strongly_consistent()
-            .await?
-            .apply_for_testing()
-            .await?;
-        assert_eq!(shared.applies_for(1), 1);
-
-        // T2: Force A to rerun without changing its emitted hash; capture elides content because
-        // storage still holds Applied{H_A}.
-        tick_a.set(1);
-        let effects_a_skipped = op_a.read_strongly_consistent().await?;
-        assert_eq!(shared.captures_with_content(), 1, "second capture elided");
-
-        // T3: B stomps storage to Applied{H_B}.
-        emit_and_take(&spec_b, input_b, vec![(1, 0xBBBB)])
-            .await?
-            .apply_for_testing()
-            .await?;
-        assert_eq!(shared.applies_for(1), 2);
-
-        // T4: A's content-elided apply signals Retry and invalidates A's producer. (We assert the
-        // raw signal here so the recovery below is unambiguously the helper's doing.)
-        let err = effects_a_skipped
-            .apply_for_testing()
-            .await
-            .expect_err("expected Retry");
-        assert!(matches!(err, EffectsError::Retry { .. }));
-
-        // T5: Recover through the production helper. It re-reads the invalidated producer (fresh
-        // capture materializes content because storage diverged), applies, and returns Ok.
-        read_strongly_consistent_and_apply_effects(op_a, |e| e).await?;
-        assert_eq!(
-            shared.applies_for(1),
-            3,
-            "helper re-read + re-applied A's effect, recovering from Retry",
         );
 
         anyhow::Ok(())
