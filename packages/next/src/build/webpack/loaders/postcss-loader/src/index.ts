@@ -83,7 +83,6 @@ export default async function loader(
       }
 
       for (const message of result.messages) {
-        // eslint-disable-next-line default-case
         switch (message.type) {
           case 'dependency':
             this.addDependency(message.file)

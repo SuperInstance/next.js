@@ -392,6 +392,13 @@ export default defineConfig([
       '@typescript-eslint/no-use-before-define': 'off',
       '@typescript-eslint/no-useless-constructor': 'error',
       '@typescript-eslint/prefer-literal-enum-member': 'error',
+
+      // For TypeScript files we rely on
+      // `@typescript-eslint/switch-exhaustiveness-check` (enabled in
+      // eslint.cli.config.mjs) to guarantee complete switch coverage on
+      // enums and discriminated unions, so requiring an additional default
+      // case here would only force dead code.
+      'default-case': 'off',
     },
   },
   {
