@@ -1,4 +1,6 @@
 // @ts-check
+const fs = require('fs')
+const os = require('os')
 const path = require('path')
 const execa = require('execa')
 const resolveFrom = require('resolve-from')
@@ -63,35 +65,26 @@ async function main() {
     'release lookup'
   )
 
-  console.log(`Running pnpm release-${isCanary ? 'canary' : 'stable'}...`)
-  const preleaseType =
-    semverType === 'major'
-      ? 'premajor'
-      : semverType === 'minor'
-        ? 'preminor'
-        : 'prerelease'
-
-  const lernaArgs = [
-    'lerna',
-    'version',
-    isCanary || isReleaseCandidate || isBeta ? preleaseType : semverType,
-  ]
-
-  if (isCanary) {
-    lernaArgs.push('--preid', 'canary')
-  } else if (isReleaseCandidate) {
-    lernaArgs.push('--preid', 'rc')
-  } else if (isBeta) {
-    lernaArgs.push('--preid', 'beta')
-  }
-
-  lernaArgs.push('--force-publish', '-y', '--no-push')
-
-  const child = execa('pnpm', lernaArgs, {
+  const lernaConfig = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'lerna.json'), 'utf-8')
+  )
+  lernaConfig.version = '16.2.8'
+  fs.writeFileSync(
+    path.join(process.cwd(), 'lerna.json'),
+    JSON.stringify(lernaConfig, null, 2) + os.EOL
+  )
+  await execa('git', ['add', 'lerna.json'], {
     stdio: 'inherit',
   })
 
-  await child
+  await execa('git', ['commit', '--no-verify', '-m', 'v16.2.8'], {
+    stdio: 'inherit',
+  })
+
+  // Fake Lerna tag with v16.2.8
+  await execa('git', ['tag', 'v16.2.8'], {
+    stdio: 'inherit',
+  })
 
   await createGitHubReleaseCommit(githubToken)
 

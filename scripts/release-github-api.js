@@ -105,21 +105,14 @@ async function createGitHubReleaseCommit(token) {
   let createdTag = false
 
   try {
+    console.log(`Tagging ${commit.sha} with ${tagName}`)
     await githubRequest(token, 'POST', `${REPO_API_PATH}/git/refs`, {
       ref: `refs/tags/${tagName}`,
       sha: commit.sha,
     })
     createdTag = true
 
-    await githubRequest(
-      token,
-      'PATCH',
-      `${REPO_API_PATH}/git/refs/heads/${branch}`,
-      {
-        sha: commit.sha,
-        force: false,
-      }
-    )
+    throw new Error(`Should have pushed ${commit.sha} to ${branch} but aborted due to dry run`)
   } catch (error) {
     if (createdTag) {
       await githubRequest(
