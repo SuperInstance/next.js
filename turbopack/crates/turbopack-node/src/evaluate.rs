@@ -12,7 +12,7 @@ use turbo_tasks::{
     Completion, Effects, FxIndexMap, NonLocalValue, OperationVc, PrettyPrintError, ResolvedVc,
     TaskInput, TryJoinIterExt, ValueToString, Vc, duration_span, fxindexmap, mark_top_level_task,
     parallel::available_parallelism, read_strongly_consistent_and_apply_effects, take_effects,
-    trace::TraceRawVcs,
+    trace::TraceRawVcs, unmark_top_level_task_may_leak_eventually_consistent_state,
 };
 use turbo_tasks_env::{EnvMap, ProcessEnv};
 use turbo_tasks_fs::{File, FileContent, FileSystemPath, to_sys_path};
@@ -194,7 +194,7 @@ async fn emit_evaluate_pool_assets_operation(
     Ok(EmittedEvaluatePoolAssets {
         bootstrap: bootstrap.to_resolved().await?,
         output_root,
-        entrypoint: entrypoint.clone(),
+        entrypoint,
     }
     .cell())
 }
@@ -248,6 +248,8 @@ pub async fn get_evaluate_pool(
     mark_top_level_task();
     let assets_with_effects =
         read_strongly_consistent_and_apply_effects(assets_op, |v| &v.effects).await?;
+    // unmark so we can read other cells
+    unmark_top_level_task_may_leak_eventually_consistent_state();
     let assets = assets_with_effects.assets.await?;
 
     let EmittedEvaluatePoolAssets {
