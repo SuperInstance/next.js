@@ -9,10 +9,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{
-    Completion, Effects, FxIndexMap, NonLocalValue, OperationVc, PrettyPrintError, ResolvedVc,
-    TaskInput, TryJoinIterExt, ValueToString, Vc, duration_span, fxindexmap, mark_top_level_task,
-    parallel::available_parallelism, read_strongly_consistent_and_apply_effects, take_effects,
-    trace::TraceRawVcs, unmark_top_level_task_may_leak_eventually_consistent_state,
+    Completion, FxIndexMap, NonLocalValue, OperationVc, PrettyPrintError, ResolvedVc, TaskInput,
+    TryJoinIterExt, ValueToString, Vc, duration_span, fxindexmap, parallel::available_parallelism,
+    resolve_strongly_consistent_and_take_and_apply_effects, trace::TraceRawVcs,
 };
 use turbo_tasks_env::{EnvMap, ProcessEnv};
 use turbo_tasks_fs::{File, FileContent, FileSystemPath, to_sys_path};
@@ -141,20 +140,6 @@ struct EmittedEvaluatePoolAssets {
     entrypoint: FileSystemPath,
 }
 
-#[turbo_tasks::value(serialization = "skip", eq = "manual")]
-struct EmittedEvaluatePoolAssetsWithEffects {
-    assets: ResolvedVc<EmittedEvaluatePoolAssets>,
-    #[turbo_tasks(trace_ignore)]
-    effects: Effects,
-}
-
-impl PartialEq for EmittedEvaluatePoolAssetsWithEffects {
-    fn eq(&self, other: &Self) -> bool {
-        self.assets == other.assets
-    }
-}
-impl Eq for EmittedEvaluatePoolAssetsWithEffects {}
-
 #[turbo_tasks::function(operation, root)]
 async fn emit_evaluate_pool_assets_operation(
     entries: ResolvedVc<EvaluateEntries>,
@@ -204,15 +189,21 @@ async fn create_evaluate_pool_assets_operation(
     entries: ResolvedVc<EvaluateEntries>,
     chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
     module_graph: ResolvedVc<ModuleGraph>,
-) -> Result<Vc<EmittedEvaluatePoolAssetsWithEffects>> {
+) -> Result<Vc<EmittedEvaluatePoolAssets>> {
     let operation = emit_evaluate_pool_assets_operation(entries, chunking_context, module_graph);
-    let assets = operation.resolve().strongly_consistent().await?;
-    // Drain the effects here (inside the producing task) and hand them to the caller, which
-    // applies them via `read_strongly_consistent_and_apply_effects` (the retry loop needs to
-    // re-read this operation, so the apply can't happen here).
-    let effects = take_effects(operation).await?;
+    // Apply the effects here (inside this producing task) via the bounded-retry helper, draining
+    // them from the nested emit operation. Returning the serializable `EmittedEvaluatePoolAssets`
+    // (rather than a `serialization = "skip"` wrapper carrying the effects) keeps this task's
+    // output restorable from the persistent cache, so a warm restart does not re-run the
+    // effect-producing tasks.
+    //
+    // HACK (retained from before the effect refactor): applying effects from inside a task means
+    // they may get re-applied if this task is invalidated. That's acceptable because the pool is
+    // created lazily; we can't move the apply to a true top-level task without eagerly reading the
+    // operation.
+    let assets = resolve_strongly_consistent_and_take_and_apply_effects(operation).await?;
 
-    Ok(EmittedEvaluatePoolAssetsWithEffects { assets, effects }.cell())
+    Ok(*assets)
 }
 
 #[derive(
@@ -238,19 +229,9 @@ pub async fn get_evaluate_pool(
     env_var_tracking: EnvVarTracking,
 ) -> Result<Vc<EvaluatePool>> {
     let assets_op = create_evaluate_pool_assets_operation(entries, chunking_context, module_graph);
-
-    // HACK: `Effects::apply` normally panics if not called at the top-level. We want to apply most
-    // effects outside of turbo-task functions to avoid re-executing effects during invalidations.
-    //
-    // That's not possible here because we lazily create the pool, so instead, use
-    // `mark_top_level_task` to avoid the debug assertion. The consequence is that these effects
-    // might get evaluated more than once if this function is invalidated.
-    mark_top_level_task();
-    let assets_with_effects =
-        read_strongly_consistent_and_apply_effects(assets_op, |v| &v.effects).await?;
-    // unmark so we can read other cells
-    unmark_top_level_task_may_leak_eventually_consistent_state();
-    let assets = assets_with_effects.assets.await?;
+    // Effects are applied inside `create_evaluate_pool_assets_operation`; a plain strongly
+    // consistent read suffices here.
+    let assets = assets_op.read_strongly_consistent().await?;
 
     let EmittedEvaluatePoolAssets {
         bootstrap,

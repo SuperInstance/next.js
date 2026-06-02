@@ -86,7 +86,8 @@ pub use crate::{
     },
     effect::{
         ApplyOutcome, CapturedEffect, Effect, EffectError, EffectStateStorage, Effects,
-        EffectsError, emit_effect, read_strongly_consistent_and_apply_effects, take_effects,
+        EffectsError, emit_effect, read_strongly_consistent_and_apply_effects,
+        resolve_strongly_consistent_and_take_and_apply_effects, take_effects,
     },
     error::PrettyPrintError,
     id::{

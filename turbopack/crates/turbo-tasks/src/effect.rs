@@ -19,7 +19,8 @@ use crate::{
     event::Event,
     invalidation::{Invalidator, get_invalidator},
     manager::{
-        debug_assert_in_top_level_task, debug_assert_not_in_top_level_task, with_turbo_tasks,
+        debug_assert_in_top_level_task, debug_assert_not_in_top_level_task, mark_top_level_task,
+        unmark_top_level_task_may_leak_eventually_consistent_state, with_turbo_tasks,
     },
     trace::TraceRawVcs,
 };
@@ -589,7 +590,8 @@ impl Effects {
     /// See [`take_effects`] for example usage.
     ///
     /// **Do not call this directly.** External callers must go through
-    /// [`read_strongly_consistent_and_apply_effects`], which owns the read+apply+retry loop
+    /// [`read_strongly_consistent_and_apply_effects`] or
+    /// [`read_strongly_consistent_and_apply_effects_with`], which own the read+apply+retry loop
     /// required to recover from [`EffectsError::Retry`]. Exposed publicly only as
     /// [`Effects::apply_for_testing`] (`#[doc(hidden)]`) so integration tests can drive the apply
     /// state machine directly.
@@ -688,7 +690,8 @@ impl Effects {
 /// warning is logged on each subsequent attempt, and on exhaustion the last `Retry` surfaces as an
 /// error.
 ///
-/// This is the only public entry point for applying effects — [`Effects::apply`] is private so the
+/// This is one of two public entry points for applying effects (see also
+/// [`read_strongly_consistent_and_apply_effects_with`]) — [`Effects::apply`] is private so the
 /// retry contract cannot be bypassed.
 pub async fn read_strongly_consistent_and_apply_effects<T, F>(
     op: OperationVc<T>,
@@ -698,7 +701,6 @@ where
     T: VcValueType,
     F: Fn(&<<T as VcValueType>::Read as VcRead<T>>::Target) -> &Effects,
 {
-    const MAX_RETRIES: usize = 4; // chosen by a fair dice roll
     let mut attempts = 0usize;
     loop {
         let value = op.read_strongly_consistent().await?;
@@ -706,29 +708,72 @@ where
         let effects = get_effects(&*value);
         match effects.apply().await {
             Ok(()) => return Ok(value),
-            Err(EffectsError::Retry { task_name, keys }) if attempts < MAX_RETRIES => {
-                attempts += 1;
-                // Warn on every retry after the first.
-                if attempts > 1 {
-                    eprintln!(
-                        "BUG: {task_name} has retried {attempts} times to write an output: \
-                         {keys:?}.  This implies multiple routes are fighting to write one of \
-                         these files.",
-                    );
-                }
-                continue;
-            }
-            // Retries exhausted: surface that we gave up after `MAX_RETRIES`, naming the task and
-            // the contended outputs.
-            Err(EffectsError::Retry { task_name, keys }) => {
-                anyhow::bail!(
-                    "gave up applying effects for {task_name} after {MAX_RETRIES} retries; \
-                     repeated effect-state divergence on: {keys:?}. This implies multiple routes \
-                     are fighting to write one of these files."
+            Err(e) => handle_apply_retry(e, &mut attempts)?,
+        }
+    }
+}
+
+/// Like [`read_strongly_consistent_and_apply_effects`], but the [`Effects`] directly accessed by
+/// calling [`take_effects`] on the supplied operation.
+///
+/// Unlike [`read_strongly_consistent_and_apply_effects`], this may be called from *inside* a
+/// turbo-tasks task (it owns the `mark`/`unmark` around `apply`). The consequence is that the
+/// effects may be re-applied if that enclosing task is invalidated — acceptable for lazily-created
+/// resources.
+///
+/// AVOID CALLING THIS UNLESS DEEPLY REQUIRED
+pub async fn resolve_strongly_consistent_and_take_and_apply_effects<T>(
+    op: OperationVc<T>,
+) -> Result<ResolvedVc<T>>
+where
+    T: VcValueType,
+{
+    let mut attempts = 0usize;
+    loop {
+        let value = op.resolve().strongly_consistent().await?;
+        // Run the callback while *not* marked top-level so it can `take_effects` / read Vcs.
+
+        let effects = take_effects(op).await?;
+        // `Effects::apply` asserts it runs at the top-level. Mark only around the apply, then
+        // unmark so any further work (including the next loop iteration's read) is unaffected.
+        mark_top_level_task();
+        let result = effects.apply().await;
+        unmark_top_level_task_may_leak_eventually_consistent_state();
+        match result {
+            Ok(()) => return Ok(value),
+            Err(e) => handle_apply_retry(e, &mut attempts)?,
+        }
+    }
+}
+
+/// Shared retry-decision for the two `read_strongly_consistent_and_apply_effects*` helpers.
+///
+/// Returns `Ok(())` to signal the caller should retry the read+apply loop (bounded by
+/// `MAX_RETRIES`). Returns `Err` for terminal outcomes: a non-`Retry` error, or `Retry` after the
+/// retry budget is exhausted.
+fn handle_apply_retry(err: EffectsError, attempts: &mut usize) -> Result<()> {
+    const MAX_RETRIES: usize = 4; // chosen by a fair dice roll
+    match err {
+        EffectsError::Retry { task_name, keys } if *attempts < MAX_RETRIES => {
+            *attempts += 1;
+            // Warn on every retry after the first.
+            if *attempts > 1 {
+                eprintln!(
+                    "BUG: {task_name} has retried {attempts} times to write an output: {keys:?}.  \
+                     This implies multiple routes are fighting to write one of these files.",
+                    attempts = *attempts,
                 );
             }
-            Err(e) => return Err(e.into()),
+            Ok(())
         }
+        // Retries exhausted: surface that we gave up after `MAX_RETRIES`, naming the task and the
+        // contended outputs.
+        EffectsError::Retry { task_name, keys } => anyhow::bail!(
+            "gave up applying effects for {task_name} after {MAX_RETRIES} retries; repeated \
+             effect-state divergence on: {keys:?}. This implies multiple routes are fighting to \
+             write one of these files."
+        ),
+        e => Err(e.into()),
     }
 }
 
