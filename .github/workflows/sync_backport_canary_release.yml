@@ -61,7 +61,7 @@ jobs:
             core.setOutput('should_dispatch', 'false')
             core.setOutput('reason', 'Head commit is not a stable release commit')
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         if: steps.precheck.outputs.should_evaluate == 'true'
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'canary' }}
