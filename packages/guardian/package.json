@@ -1,0 +1,28 @@
+{
+  "name": "@superinstance/guardian",
+  "version": "0.1.0",
+  "description": "Build Budget Guardian — tracks build resource usage and enforces conservation principles for Next.js apps",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "jest --config jest.config.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["nextjs", "build", "budget", "bundle", "performance", "guardian"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.11.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.3.3"
+  },
+  "peerDependencies": {
+    "next": ">=13.0.0"
+  },
+  "peerDependenciesMeta": {
+    "next": { "optional": true }
+  }
+}
